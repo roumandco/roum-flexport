@@ -3,17 +3,19 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import express from "express";
 
-const FLEXPORT_API = "https://api.flexport.com";
-const API_KEY = process.env.FLEXPORT_API_KEY;
+const SHOPIFY_STORE = "roumgold.myshopify.com";
+const API_TOKEN = process.env.SHOPIFY_API_TOKEN;
+const API_VERSION = "2025-01";
+const SHOPIFY_API = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}`;
 
-if (!API_KEY) {
-  console.error("ERROR: FLEXPORT_API_KEY environment variable is required.");
+if (!API_TOKEN) {
+  console.error("ERROR: SHOPIFY_API_TOKEN environment variable is required.");
   process.exit(1);
 }
 
-// ── Flexport HTTP helper ──────────────────────────────────────────────────────
-async function flexport(path, { method = "GET", params = {}, body } = {}) {
-  const url = new URL(`${FLEXPORT_API}${path}`);
+// ── Shopify HTTP helper ───────────────────────────────────────────────────────
+async function shopify(path, { method = "GET", params = {}, body } = {}) {
+  const url = new URL(`${SHOPIFY_API}${path}`);
   if (method === "GET") {
     Object.entries(params).forEach(([k, v]) => {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -23,39 +25,39 @@ async function flexport(path, { method = "GET", params = {}, body } = {}) {
   const res = await fetch(url.toString(), {
     method,
     headers: {
-      Authorization: `Bearer ${API_KEY}`,
+      "X-Shopify-Access-Token": API_TOKEN,
       "Content-Type": "application/json",
-      "Flexport-Version": "2",
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
 
   const json = await res.json();
   if (!res.ok) {
-    const msg = json?.error?.message || json?.message || res.statusText;
-    throw new Error(`Flexport API error ${res.status}: ${msg}`);
+    const msg = json?.errors || json?.error?.message || res.statusText;
+    throw new Error(`Shopify API error ${res.status}: ${JSON.stringify(msg)}`);
   }
   return json;
 }
 
 // ── MCP Server ────────────────────────────────────────────────────────────────
 const server = new McpServer({
-  name: "flexport-mcp",
+  name: "roumgold-shopify-mcp",
   version: "1.0.0",
 });
 
-// LIST SHIPMENTS
+// LIST ORDERS
 server.tool(
-  "list_shipments",
-  "List all Flexport shipments, optionally filtered by status or date range.",
+  "list_orders",
+  "List Shopify orders, optionally filtered by status.",
   {
-    status: z.string().optional().describe("Filter by shipment status, e.g. 'active', 'delivered'"),
-    per_page: z.number().int().min(1).max(100).default(20).describe("Results per page (max 100)"),
-    page: z.number().int().min(1).default(1).describe("Page number"),
+    status: z.enum(["open", "closed", "cancelled", "any"]).default("any").describe("Order status filter"),
+    fulfillment_status: z.enum(["shipped", "partial", "unshipped", "unfulfilled", "any"]).optional().describe("Filter by fulfillment status"),
+    limit: z.number().int().min(1).max(250).default(50).describe("Number of orders to return (max 250)"),
+    page_info: z.string().optional().describe("Pagination cursor from previous response"),
   },
-  async ({ status, per_page, page }) => {
-    const data = await flexport("/shipments", {
-      params: { status, per_page, page },
+  async ({ status, fulfillment_status, limit, page_info }) => {
+    const data = await shopify("/orders.json", {
+      params: { status, fulfillment_status, limit, page_info },
     });
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -63,65 +65,47 @@ server.tool(
   }
 );
 
-// GET SHIPMENT
+// GET ORDER
 server.tool(
-  "get_shipment",
-  "Retrieve full details for a single Flexport shipment by its ID.",
+  "get_order",
+  "Retrieve full details for a single Shopify order by its ID.",
   {
-    shipment_id: z.number().int().describe("Flexport shipment ID (numeric Flex ID)"),
+    order_id: z.number().int().describe("Shopify order ID"),
   },
-  async ({ shipment_id }) => {
-    const data = await flexport(`/shipments/${shipment_id}`);
+  async ({ order_id }) => {
+    const data = await shopify(`/orders/${order_id}.json`);
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
   }
 );
 
-// LIST CONTAINERS
+// LIST FULFILLMENTS FOR AN ORDER
 server.tool(
-  "list_containers",
-  "List all ocean containers in your Flexport account.",
+  "list_fulfillments",
+  "List all fulfillments (shipments) for a specific order.",
   {
-    per_page: z.number().int().min(1).max(100).default(20).describe("Results per page"),
-    page: z.number().int().min(1).default(1).describe("Page number"),
+    order_id: z.number().int().describe("Shopify order ID"),
   },
-  async ({ per_page, page }) => {
-    const data = await flexport("/containers", { params: { per_page, page } });
+  async ({ order_id }) => {
+    const data = await shopify(`/orders/${order_id}/fulfillments.json`);
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
   }
 );
 
-// GET CONTAINER
+// LIST PRODUCTS
 server.tool(
-  "get_container",
-  "Retrieve details for a single ocean container by ID.",
+  "list_products",
+  "List products in the Shopify store.",
   {
-    container_id: z.number().int().describe("Flexport container ID"),
+    limit: z.number().int().min(1).max(250).default(50).describe("Number of products to return"),
+    status: z.enum(["active", "archived", "draft"]).optional().describe("Filter by product status"),
   },
-  async ({ container_id }) => {
-    const data = await flexport(`/containers/${container_id}`);
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-    };
-  }
-);
-
-// LIST DOCUMENTS
-server.tool(
-  "list_documents",
-  "List all documents (invoices, BOLs, air waybills, etc.) in your account.",
-  {
-    shipment_id: z.number().int().optional().describe("Filter by shipment ID"),
-    document_type: z.string().optional().describe("Filter by document type, e.g. 'commercial_invoice', 'air_waybill'"),
-    per_page: z.number().int().min(1).max(100).default(20).describe("Results per page"),
-    page: z.number().int().min(1).default(1).describe("Page number"),
-  },
-  async ({ shipment_id, document_type, per_page, page }) => {
-    const data = await flexport("/documents", {
-      params: { shipment_id, document_type, per_page, page },
+  async ({ limit, status }) => {
+    const data = await shopify("/products.json", {
+      params: { limit, status },
     });
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -129,19 +113,17 @@ server.tool(
   }
 );
 
-// LIST INVOICES
+// LIST INVENTORY LEVELS
 server.tool(
-  "list_invoices",
-  "List freight invoices, optionally filtered by status, shipment, or date range.",
+  "list_inventory_levels",
+  "List inventory levels across locations.",
   {
-    status: z.string().optional().describe("Invoice status, e.g. 'open', 'paid'"),
-    shipment_id: z.number().int().optional().describe("Filter by shipment ID"),
-    per_page: z.number().int().min(1).max(100).default(20).describe("Results per page"),
-    page: z.number().int().min(1).default(1).describe("Page number"),
+    location_ids: z.string().optional().describe("Comma-separated location IDs to filter by"),
+    limit: z.number().int().min(1).max(250).default(50).describe("Number of results to return"),
   },
-  async ({ status, shipment_id, per_page, page }) => {
-    const data = await flexport("/invoices", {
-      params: { status, shipment_id, per_page, page },
+  async ({ location_ids, limit }) => {
+    const data = await shopify("/inventory_levels.json", {
+      params: { location_ids, limit },
     });
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -149,34 +131,43 @@ server.tool(
   }
 );
 
-// LIST WEBHOOK EVENTS
+// LIST LOCATIONS
 server.tool(
-  "list_webhook_events",
-  "List recent Flexport webhook events (milestones, document updates, etc.).",
-  {
-    per_page: z.number().int().min(1).max(100).default(20).describe("Results per page"),
-    page: z.number().int().min(1).default(1).describe("Page number"),
-  },
-  async ({ per_page, page }) => {
-    const data = await flexport("/webhook_events", { params: { per_page, page } });
+  "list_locations",
+  "List all fulfillment locations for the store.",
+  {},
+  async () => {
+    const data = await shopify("/locations.json");
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
   }
 );
 
-// CALCULATE CARBON EMISSIONS
+// LIST RETURNS
 server.tool(
-  "calculate_carbon",
-  "Calculate estimated carbon emissions for a shipment.",
+  "list_returns",
+  "List returns for a specific order.",
   {
-    shipment_id: z.number().int().describe("Flexport shipment ID"),
+    order_id: z.number().int().describe("Shopify order ID"),
   },
-  async ({ shipment_id }) => {
-    const data = await flexport("/carbon/emissions", {
-      method: "POST",
-      body: { shipment_id },
-    });
+  async ({ order_id }) => {
+    const data = await shopify(`/orders/${order_id}/returns.json`);
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+    };
+  }
+);
+
+// LIST TRANSACTIONS
+server.tool(
+  "list_transactions",
+  "List financial transactions for a specific order.",
+  {
+    order_id: z.number().int().describe("Shopify order ID"),
+  },
+  async ({ order_id }) => {
+    const data = await shopify(`/orders/${order_id}/transactions.json`);
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
@@ -187,10 +178,8 @@ server.tool(
 const app = express();
 app.use(express.json());
 
-// Health check — used by Railway / Render / Fly.io
-app.get("/", (_, res) => res.json({ status: "ok", server: "flexport-mcp" }));
+app.get("/", (_, res) => res.json({ status: "ok", server: "roumgold-shopify-mcp" }));
 
-// MCP endpoint (Streamable HTTP transport)
 app.all("/mcp", async (req, res) => {
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
@@ -205,6 +194,6 @@ app.all("/mcp", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Flexport MCP server listening on port ${PORT}`);
+  console.log(`Shopify MCP server listening on port ${PORT}`);
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
 });
