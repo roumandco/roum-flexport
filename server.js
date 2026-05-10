@@ -193,7 +193,8 @@ app.get("/", (_, res) => res.json({ status: "ok", server: "flexport-mcp" }));
 // MCP endpoint (Streamable HTTP transport)
 app.all("/mcp", async (req, res) => {
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // stateless — required for claude.ai connectors
+    sessionIdGenerator: undefined,
+    allowedHosts: ["*"],
   });
 
   res.on("close", () => transport.close());
